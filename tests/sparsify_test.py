@@ -30,6 +30,19 @@ from jax.experimental.sparse.util import CuSparseEfficiencyWarning
 
 config.parse_flags_with_absl()
 
+def rand_sparse(rng, nse=0.5, post=lambda x: x, rand_method=jtu.rand_default):
+  def _rand_sparse(shape, dtype, nse=nse):
+    rand = rand_method(rng)
+    size = np.prod(shape).astype(int)
+    if 0 <= nse < 1:
+      nse = nse * size
+    nse = min(size, int(nse))
+    M = rand(shape, dtype)
+    indices = rng.choice(size, size - nse, replace=False)
+    M.flat[indices] = 0
+    return post(M)
+  return _rand_sparse
+
 
 class SparsifyTest(jtu.JaxTestCase):
   @classmethod
@@ -73,9 +86,12 @@ class SparsifyTest(jtu.JaxTestCase):
     self.assertEqual(len(spvalues), len(args))
     self.assertLen(spenv._buffers, 5)
     self.assertEqual(spvalues,
-        (SparsifyValue(X.shape, 0, None, False),
-         SparsifyValue(X.shape, 1, 2, True),
-         SparsifyValue(X.shape, 3, 4, True)))
+        (SparsifyValue(X.shape, 0, None, indices_sorted=False,
+                       unique_indices=False),
+         SparsifyValue(X.shape, 1, 2, indices_sorted=True,
+                       unique_indices=True),
+         SparsifyValue(X.shape, 3, 4, indices_sorted=True,
+                       unique_indices=True)))
 
     args_out = spvalues_to_arrays(spenv, spvalues)
     self.assertEqual(len(args_out), len(args))
@@ -207,6 +223,31 @@ class SparsifyTest(jtu.JaxTestCase):
     out, = spvalues_to_arrays(spenv, args_out)
 
     self.assertAllClose(out.todense(), x.todense() * y.todense())
+
+  @parameterized.named_parameters(jtu.cases_from_list(
+      {"testcase_name": "_{}_nbatch={}_ndense={}".format(
+        jtu.format_shape_dtype_string(shape, dtype), n_batch, n_dense),
+       "shape": shape, "dtype": dtype, "n_batch": n_batch, "n_dense": n_dense}
+      for shape in [(5,), (5, 8), (8, 5), (3, 4, 5), (3, 4, 3, 2)]
+      for dtype in (jtu.dtypes.integer + jtu.dtypes.floating +
+                    jtu.dtypes.complex)
+      for n_batch in range(len(shape) + 1)
+      for n_dense in range(len(shape) + 1 - n_batch)))
+  def testSparseMulWithSharedButNotUniqueIndices(
+      self, shape, dtype, n_batch, n_dense):
+    rng_sparse = rand_sparse(self.rng(), rand_method=jtu.rand_some_zero)
+    M = BCOO.fromdense(rng_sparse(shape, dtype), n_batch=n_batch,
+                       n_dense=n_dense)
+    new_indices = jnp.concatenate([M.indices, M.indices], axis=n_batch)
+    new_data_x = jnp.concatenate([M.data, M.data], axis=n_batch)
+    new_data_y = jnp.concatenate([2 * M.data, 3 * M.data], axis=n_batch)
+
+    x = BCOO((new_data_x, new_indices), shape=M.shape)
+    y = BCOO((new_data_y, new_indices), shape=M.shape)
+
+    actual_results = self.sparsify(operator.mul)(x, y).todense()
+    expected_results = x.todense() * y.todense()
+    self.assertAllClose(expected_results, actual_results)
 
   def testSparseSubtract(self):
     x = BCOO.fromdense(3 * jnp.arange(5))

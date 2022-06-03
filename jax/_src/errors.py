@@ -42,7 +42,7 @@ class ConcretizationTypeError(JAXTypeError):
   concrete value is required. In some situations, it can be easily fixed by
   marking problematic values as static; in others, it may indicate that your
   program is doing operations that are not directly supported by JAX's JIT
-  compilation model.
+  compilation model
 
   Traced value where static value is expected
     One common cause of this error is using a traced value where a static value
